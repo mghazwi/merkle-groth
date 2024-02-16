@@ -29,6 +29,175 @@ type CompressHG = pedersen::constraints::TwoToOneCRHGadget<JubJub, EdwardsVar, W
 
 type LeafVar<ConstraintF> = [UInt8<ConstraintF>];
 
+#[derive(Derivative)]
+#[derivative(Clone(bound = "P: Config"))]
+pub struct MC<P: Config> {
+    // /// stores the non-leaf nodes in level order. The first element is the root node.
+    // /// The ith nodes (starting at 1st) children are at indices `2*i`, `2*i+1`
+    // non_leaf_nodes: Vec<P::InnerDigest>,
+    /// store the hash of leaf nodes from left to right
+    leaf: Option<Vec<u8>>,
+    /// root
+    root: Option<P::LeafDigest>,
+    /// Store the inner hash parameters
+    two_to_one_hash_param: TwoToOneParam<P>,
+    /// Store the leaf hash parameters
+    leaf_hash_param: LeafParam<P>,
+    // /// Stores the height of the MerkleTree
+    // height: usize,
+    /// proof
+    proof: Option<Path<P>>,
+}
+
+impl<P: Config> MC<P> {
+    /// Create an empty merkle tree such that all leaves are zero-filled.
+    /// Consider using a sparse merkle tree if you need the tree to be low memory
+    pub fn blank(
+        leaf_hash_param: &LeafParam<P>,
+        two_to_one_hash_param: &TwoToOneParam<P>,
+        // height: usize,
+    ) -> Result<Self, ark_crypto_primitives::Error> {
+        // use empty leaf digest
+        // let leaf_digests = vec![P::LeafDigest::default(); 1 << (height - 1)];
+        // Self::new_with_leaf_digest(leaf_hash_param, two_to_one_hash_param, leaf_digests)
+        Ok(MC {
+            leaf: None,
+            root: None,
+            two_to_one_hash_param: two_to_one_hash_param.clone(),
+            leaf_hash_param: leaf_hash_param.clone(),
+            proof: None,
+        })
+    }
+
+    /// Returns a new merkle tree. `leaves.len()` should be power of two.
+    pub fn new(
+        leaf_hash_param: &LeafParam<P>,
+        two_to_one_hash_param: &TwoToOneParam<P>,
+        leaf: Vec<u8>,//P::LeafDigest,
+        root: P::LeafDigest,
+        proof: Path<P>
+        // #[cfg(not(feature = "parallel"))] leaves: impl IntoIterator<Item=L>,
+        // #[cfg(feature = "parallel")] leaves: impl IntoParallelIterator<Item=L>,
+    ) -> Result<Self, ark_crypto_primitives::Error> {
+        // let leaf_digests: Vec<_> = cfg_into_iter!(leaves)
+        //     .map(|input| P::LeafHash::evaluate(leaf_hash_param, input.as_ref()))
+        //     .collect::<Result<Vec<_>, _>>()?;
+        // let leaf_digest = P::LeafHash::evaluate(leaf_hash_param, leaf.as_ref());
+
+        // Self::new_with_leaf_digest(leaf_hash_param, two_to_one_hash_param, leaf_digest.unwrap(), root, proof)
+
+        Ok(MC {
+            leaf: Some(leaf),
+            root: Some(root),
+            leaf_hash_param: leaf_hash_param.clone(),
+            two_to_one_hash_param: two_to_one_hash_param.clone(),
+            proof: Some(proof),
+        })
+    }
+}
+
+type JubJubMerkleTreeCircuit = MC<JubJubMerkleTreeParams>;
+
+impl ConstraintSynthesizer<ConstraintF> for JubJubMerkleTreeCircuit {
+    fn generate_constraints(
+        self,
+        cs: ConstraintSystemRef<ConstraintF>,
+    ) -> Result<(), SynthesisError> {
+        // First, we allocate the public inputs
+        // let root = RootVar::new_input(ark_relations::ns!(cs, "root_var"), || Ok(&self.root))?;
+
+        // Allocate Merkle Tree Root
+        let root = <LeafHG as CRHSchemeGadget<LeafH, _>>::OutputVar::new_witness(
+            ark_relations::ns!(cs, "new_digest"),
+            || {
+                // if use_bad_root {
+                self.root.ok_or(SynthesisError::AssignmentMissing)
+                // } else {
+                //     Ok(root)
+                // }
+            },
+        )
+            .unwrap();
+
+        // let leaf = UInt8::new_input(ark_relations::ns!(cs, "leaf_var"), || Ok(&self.leaf))?;
+
+        // Allocate Leaf
+        // let mut leaves = Vec::new();
+        // for i in 0..4u8 {
+        //     let input = vec![i; 30];
+        //     leaves.push(input);
+        // }
+        // let leaf_g = UInt8::new_input_vec(cs, &leaves[1]).unwrap();
+        let leaf_g = UInt8::new_witness_vec(cs.clone(), &self.leaf.ok_or(SynthesisError::AssignmentMissing).unwrap()).unwrap();
+        // let leaf_g = <LeafHG as CRHSchemeGadget<LeafH, _>>::OutputVar::new_witness(
+        //     ark_relations::ns!(cs, "new_digest"),
+        //     || {
+        //         // if use_bad_root {
+        //         Ok(self.leaf.unwrap())
+        //         // } else {
+        //         //     Ok(root)
+        //         // }
+        //     },
+        // )
+        //     .unwrap();
+
+        // // Then, we allocate the public parameters as constants:
+        // let leaf_crh_params = LeafHashParamsVar::new_constant(cs.clone(), &self.leaf_crh_params)?;
+        // let two_to_one_crh_params =
+        //     TwoToOneHashParamsVar::new_constant(cs.clone(), &self.two_to_one_crh_params)?;
+
+        // Allocate Parameters for CRH
+        let leaf_crh_params_var =
+            <LeafHG as CRHSchemeGadget<LeafH, _>>::ParametersVar::new_constant(
+                ark_relations::ns!(cs, "leaf_crh_parameter"),
+                &self.leaf_hash_param,// leaf_crh_params,
+            )
+                .unwrap();
+        let two_to_one_crh_params_var =
+            <CompressHG as TwoToOneCRHSchemeGadget<CompressH, _>>::ParametersVar::new_constant(
+                ark_relations::ns!(cs, "two_to_one_crh_parameter"),
+                &self.two_to_one_hash_param, // two_to_one_crh_params,
+            )
+                .unwrap();
+
+        // Finally, we allocate our path as a private witness variable:
+        // let path = SimplePathVar::new_witness(ark_relations::ns!(cs, "path_var"), || {
+        //     Ok(self.authentication_path.as_ref().unwrap())
+        // })?;
+
+        // Allocate Merkle Tree Path
+        let proof = self.proof.unwrap();
+        let cw: PathVar<JubJubMerkleTreeParams, Fq, JubJubMerkleTreeParamsVar> =
+            PathVar::new_witness(ark_relations::ns!(cs, "new_witness"), || Ok(&self.proof.ok_or(SynthesisError::AssignmentMissing))).unwrap();
+
+        // let leaf_bytes = vec![self.leaf; 1];
+
+        // Now, we have to check membership. How do we do that?
+        // Hint: look at https://github.com/arkworks-rs/crypto-primitives/blob/6be606259eab0aec010015e2cfd45e4f134cd9bf/src/merkle_tree/constraints.rs#L135
+
+        let is_member = cw. verify_membership(
+            &leaf_crh_params_var,
+            &two_to_one_crh_params_var,
+            &root,
+            &leaf_g,
+        )
+            .unwrap();
+        // .value()
+        // .unwrap();
+
+        // let is_member = // TODO: FILL IN THE BLANK!
+        //     path.verify_membership(
+        //     &leaf_crh_params,
+        //     &two_to_one_crh_params,
+        //     &root,
+        //     &leaf_bytes.as_slice(),
+        // )?;
+
+        is_member.enforce_equal(&Boolean::TRUE)?;
+
+        Ok(())
+    }
+}
 
 // #[derive(Derivative)]
 #[derive(Derivative)]
@@ -36,17 +205,15 @@ type LeafVar<ConstraintF> = [UInt8<ConstraintF>];
 pub struct MT<P: Config> {
     // /// stores the non-leaf nodes in level order. The first element is the root node.
     // /// The ith nodes (starting at 1st) children are at indices `2*i`, `2*i+1`
-    // non_leaf_nodes: Vec<P::InnerDigest>,
+    non_leaf_nodes: Vec<P::InnerDigest>,
     /// store the hash of leaf nodes from left to right
-    leaf: P::LeafDigest,
-    /// root
-    root: P::LeafDigest,
+    leaf_nodes: Vec<P::LeafDigest>,
     /// Store the inner hash parameters
     two_to_one_hash_param: TwoToOneParam<P>,
     /// Store the leaf hash parameters
     leaf_hash_param: LeafParam<P>,
-    // /// Stores the height of the MerkleTree
-    // height: usize,
+    /// Stores the height of the MerkleTree
+    height: usize,
     /// proof
     proof: Option<Path<P>>,
 }
@@ -68,8 +235,8 @@ impl<P: Config> MT<P> {
     pub fn new<L: AsRef<P::Leaf> + Send>(
         leaf_hash_param: &LeafParam<P>,
         two_to_one_hash_param: &TwoToOneParam<P>,
-        #[cfg(not(feature = "parallel"))] leaves: impl IntoIterator<Item=L>,
-        #[cfg(feature = "parallel")] leaves: impl IntoParallelIterator<Item=L>,
+        leaves: impl IntoIterator<Item=L>,
+        // #[cfg(feature = "parallel")] leaves: impl IntoParallelIterator<Item=L>,
     ) -> Result<Self, ark_crypto_primitives::Error> {
         let leaf_digests: Vec<_> = cfg_into_iter!(leaves)
             .map(|input| P::LeafHash::evaluate(leaf_hash_param, input.as_ref()))
@@ -375,7 +542,7 @@ impl ConstraintSynthesizer<ConstraintF> for JubJubMerkleTree {
             let input = vec![i; 30];
             leaves.push(input);
         }
-        let leaf_g = UInt8::new_input_vec(cs, &leaves[1]).unwrap();
+        let leaf_g = UInt8::new_input_vec(cs.clone(), &leaves[1]).unwrap();
 
         // // Then, we allocate the public parameters as constants:
         // let leaf_crh_params = LeafHashParamsVar::new_constant(cs.clone(), &self.leaf_crh_params)?;
@@ -621,6 +788,21 @@ fn merkle_tree_test(
             "verification constraints not satisfied"
         );
 
+        let c = JubJubMerkleTreeCircuit::new(&l_c_p,&t_o_p,leaf.clone(),tree.root(),proof).unwrap();
+        let c_empty = MC{
+            leaf: None,
+            root: None,
+            two_to_one_hash_param: l_c_p,
+            leaf_hash_param: t_o_p,
+            proof: None,
+        };
+            //JubJubMerkleTreeCircuit::blank(&l_c_p,&t_o_p).unwrap();
+        let mut rng = StdRng::seed_from_u64(0u64);
+        let (pk, vk) = {
+            ark_groth16::Groth16::<Bls12_381>::circuit_specific_setup(c_empty, &mut rng).unwrap()
+        };
+
+        break;
         // let circuit = MerkleTreeVerification {
         //     // constants
         //     leaf_crh_params:&l_c_p,
@@ -633,24 +815,24 @@ fn merkle_tree_test(
         //     // witness
         //     authentication_path: Some(proof),
         // };
-        let mut rng = StdRng::seed_from_u64(0u64);
-        let (pk, vk) = {
-            ark_groth16::Groth16::<Bls12_381>::circuit_specific_setup(c.clone(), &mut rng).unwrap()
-        };
-        // // prepare the verification key
-        let pvk = ark_groth16::prepare_verifying_key(&vk);
-
-        let groth_proof = ark_groth16::Groth16::<Bls12_381>::create_random_proof_with_reduction(c,&pk,&mut rng).unwrap();
-
-        let public_input = [
-            c.leaf_hash_param.clone(),
-            c.two_to_one_hash_param.clone(),
-            c.leaf_nodes[i].clone().into(),
-        ];
-
-        ark_groth16::Groth16::<Bls12_381>::verify_proof(&pvk,&groth_proof,&public_input);
-
-        break;
+        // let mut rng = StdRng::seed_from_u64(0u64);
+        // let (pk, vk) = {
+        //     ark_groth16::Groth16::<Bls12_381>::circuit_specific_setup(c.clone(), &mut rng).unwrap()
+        // };
+        // // // prepare the verification key
+        // let pvk = ark_groth16::prepare_verifying_key(&vk);
+        //
+        // let groth_proof = ark_groth16::Groth16::<Bls12_381>::create_random_proof_with_reduction(c,&pk,&mut rng).unwrap();
+        //
+        // let public_input = [
+        //     c.leaf_hash_param.clone(),
+        //     c.two_to_one_hash_param.clone(),
+        //     c.leaf_nodes[i].clone().into(),
+        // ];
+        //
+        // ark_groth16::Groth16::<Bls12_381>::verify_proof(&pvk,&groth_proof,&public_input);
+        //
+        // break;
     }
 
     // // check update
